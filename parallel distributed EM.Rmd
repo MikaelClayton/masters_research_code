@@ -1,0 +1,547 @@
+---
+title: "Parallel processing GMM"
+author: "Bronwyn McCall"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Methods of parallel processing
+1. **Socket**: launches a new version of R on each core. Technically this connection is done via networking, but the connection is happening all on your computer. If you get a warning from your computer asking whether to allow R to accept incoming connections, you should allow it. Have to use Sockets as it works on Windows.
+
+2. **Forking**: copies the entire current version of R and moves it to a new core. 
+
+## Generating data
+```{r libraries}
+library(parallel)
+library(ggplot2)
+```
+
+```{r data}
+set.seed(123)
+
+# SET MODEL HYPERPARAMETERS AND SETTINGS
+K <- 2 # number of components
+n <- 1000 # sample size
+m <- 4 # number of nodes
+n_m <- n/m # sample size per node
+
+# TRUE PARAMETERS
+pi_1 <- 0.3
+pi_2 <- 1 - pi_1
+mu_1 <- 0
+mu_2 <- 2
+si_1 <- 1
+si_2 <- 2
+probs <- c(pi_1, pi_2)
+means <- c(mu_1, mu_2)
+stds <- c(si_1, si_2)
+params <- list("mixing_probs" = probs, "means" = means, "stds" = stds)
+
+# PARAMETER STARTING VALUES
+pi_1_init <- 0.5
+pi_2_init <- 0.5
+mu_1_init <- 0.2
+mu_2_init <- 1.5
+si_1_init <- 1
+si_2_init <- 1.5
+probs_init <- c(pi_1_init, pi_2_init)
+means_init <- c(mu_1_init, mu_2_init)
+stds_init <- c(si_1_init, si_2_init)
+params_init <- list("mixing_probs" = probs_init,
+                    "means" = means_init,
+                    "stds" = stds_init)
+
+# GENERATING DATA
+generate_data <- function(means, stds, probs, n){
+  ## Ensure different parameter lengths match
+    if(length(means) != length(stds) || length(means) != length(probs)){
+        stop("Number of means, standard deviations and components probabilities 
+             must be equal.")
+  }
+    data <- matrix(nrow = n)
+    for(i in 1:n){
+        component <- rmultinom(1, 1, probs) + 1
+        data[i] <- rnorm(1, mean = means[component], sd = stds[component])
+  }
+    return(data)
+}
+
+data_nodes <- lapply(1:m, function(x) generate_data(means, stds, probs, n_m))
+
+# PLOT DATA
+plot_data_GMM <- function(data, n_components, params, overlay = TRUE,
+                      freq = FALSE){
+  ## Extracting parameters
+  means <- params$means
+  stds <- params$stds
+  probs <- params$mixing_probs
+  ## Histogram
+  hist(data, breaks = 50, col = "lightblue", xlab = "Value", 
+       main = "Histogram of two-component univariate Gaussian mixture model",
+       freq = freq)
+  ## Overlayed line plot
+  if (overlay) {
+    colors <- rainbow(n_components)
+    for (i in 1:n_components){
+      curve(dnorm(x, mean = means[i], sd = stds[i])*probs[i], add = TRUE, 
+            col = colors[i], lwd = 2)
+    }
+  }
+}
+
+
+## Plots
+plot_data_GMM(data = data_nodes[[1]], K, params) # data node 1
+plot_data_GMM(data = data_nodes[[2]], K, params) # data node 2
+plot_data_GMM(data = data_nodes[[3]], K, params) # data node 3
+plot_data_GMM(data = data_nodes[[4]], K, params) # data node 4
+plot_data_GMM(data = unlist(data_nodes), K, params) # all data
+```
+
+## Functions to get local sufficient statistics
+Functions:
+
+1. calculate_data_belonings
+2. calculate_node_local_sufficient_statistics
+
+### calculate_data_belongings
+
+* Used on each worker node
+* Calculates the data points conditional component belongings (probabilities) based on the data and the current parameter estimates
+* For each data point $\sum_k^K \pi_k = 1$ and $\pi_k \in [0, 1]$
+
+```{r data belongings}
+calculate_data_belongings <- function(params, data){
+
+  
+  ### Extracting parameters and checking if they are they same.
+  means <- params$means
+  stds <- params$stds
+  probs <- params$mixing_probs
+  if (length(means) != length(stds) || length(means) != length(probs)){
+    stop("Number of means, standard deviations, and weights must be equal.")
+  }
+  
+  ### Get the data sample and number of components
+  n_components <- length(means) 
+  n <- length(data)
+  
+  ### Calculating the belongings 
+  gamma_num <- matrix(nrow = n, ncol = n_components)
+  for(i in 1:n_components){
+    gamma_num[,i] <- probs[i] * dnorm(data, mean = means[i], sd = stds[i])
+  }
+  gamma_den <- rowSums(gamma_num)
+  gamma <- gamma_num / gamma_den
+  
+  ### Check if data belongings sum to 1 (have grace for rounding errors).
+  if (any(abs(rowSums(gamma) - 1) > .Machine$double.eps * n)){
+      stop("Calculated belongings for each data point do not sum to 1.")
+  }
+  
+  ### Check if any data belonging is negative
+  if (any(gamma < 0)){
+      stop("Calculated belongings contain negative values.")
+  }
+  return(gamma)
+}
+
+### test (vectorisation)
+# lapply(1:m, function(x) calculate_data_belongings(params = params_init, data = data_nodes[[x]]))
+# 
+# ### try parallel
+# cl <- makeCluster(4, type = "PSOCK")
+# clusterExport(cl, "params_init")
+# clusterExport(cl, "calculate_data_belongings")
+# data_belongings <- parLapply(cl, data_nodes, function(d) {
+#     calculate_data_belongings(data = d, params = params_init)
+# })
+# data_belongings
+# stopCluster(cl)
+```
+### calculate_node_local_sufficient_statistics
+
+* Used on worker nodes.
+* For each worker node it calculates the nodes respective local sufficient statistics
+\begin{equation}
+\begin{split}
+a_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t} \\
+b_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t}y_{m,i} \\
+c_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t}y_{m,i}^2 
+\end{split}
+\end{equation}
+
+```{r node local statistics}
+calculate_node_local_sufficient_statistics <- function(data, params){
+    ### Calculating the data belongings
+    belongings <- calculate_data_belongings(params = params, data = data)
+    
+    ### Calculating the local sufficient statistics for the node
+    #### Number 1: sum of data belongings
+    sufficient_stat_one <- colSums(belongings)
+    
+    #### Number 2: sum of product (data and data belongings)
+    sufficient_stat_two <- colSums(belongings * matrix(data, nrow = length(data), ncol = ncol(belongings), byrow = FALSE))
+    
+    #### Number 3: sum of product (data squared and data belongings)
+    sufficient_stat_three <- colSums(belongings * matrix(data^2, nrow = length(data), ncol = ncol(belongings), byrow = FALSE))
+    
+    if(sum(sufficient_stat_one) != length(data)){
+        stop("The sum of the first sufficient statistic does not equal node sample size")
+    }
+    
+    if(any(sufficient_stat_three < 0)){
+        stop("Third sufficient statistic is negative")
+    }
+    return(list("suff_stat_one" = sufficient_stat_one, 
+                "suff_stat_two" = sufficient_stat_two,
+                "suff_stat_three" = sufficient_stat_three)
+    )
+}
+
+### test (vectorisation)
+# m <- 4
+# lapply(1:m, function(x) calculate_node_local_sufficient_statistics(data = data_nodes[[x]], params = params_init))
+```
+## Functions to get updated parameter estimates
+
+Functions:
+
+1. calculate_global_statistics (sum local statistics)
+2. estimate_parameters 
+
+### calculate_global_statistics
+
+* done on manager node
+* gets the local statistics calculated on each node and sums them together to the global statistics
+
+```{r global statistics}
+calculate_global_statistics <- function(...){
+    local_statistics <- list(...)
+    
+    global_suff_stat_one <- NULL
+    global_suff_stat_two <- NULL
+    global_suff_stat_three <- NULL
+    
+    for(local_stat in local_statistics){
+        if(is.null(global_suff_stat_one)){
+            global_suff_stat_one <- local_stat$suff_stat_one
+            global_suff_stat_two <- local_stat$suff_stat_two
+            global_suff_stat_three <- local_stat$suff_stat_three
+        } else{
+            global_suff_stat_one <- global_suff_stat_one + local_stat$suff_stat_one
+            global_suff_stat_two <- global_suff_stat_two + local_stat$suff_stat_two
+            global_suff_stat_three <- global_suff_stat_three + local_stat$suff_stat_three
+        }
+    }
+    
+    if(sum(global_suff_stat_one) <= 0){
+        stop("The sum of the first global sufficient statistics must be positi`ve")
+    }
+    
+    if(any(global_suff_stat_three < 0)){
+        stop("Third global sufficient statistics is negative")
+    }
+    return(list("global_suff_stat_one" = global_suff_stat_one,
+                "global_suff_stat_two" = global_suff_stat_two,
+                "global_suff_stat_three" = global_suff_stat_three))
+}
+
+### Test
+local_suff_node_1 <- calculate_node_local_sufficient_statistics(
+    data = data_nodes[[1]],
+    params = params_init
+)
+local_suff_node_2 <- calculate_node_local_sufficient_statistics(
+    data = data_nodes[[2]],
+    params = params_init
+)
+local_suff_node_3 <- calculate_node_local_sufficient_statistics(
+    data = data_nodes[[3]],
+    params = params_init
+)
+local_suff_node_4 <- calculate_node_local_sufficient_statistics(
+    data = data_nodes[[4]],
+    params = params_init
+)
+
+# calculate_global_statistics(local_suff_node_1, local_suff_node_2,
+                            # local_suff_node_3, local_suff_node_4)
+```
+### estimate_parameters
+
+* done on manager node
+* updates the GMM parameter estimates using the global sufficient statistics
+
+\begin{equation}
+\begin{split}
+\pi_k & = \frac{a_k^t}{\sum_{k}^{K}a_k^t} \\
+\mu_k & = \frac{b_k^t}{a_k^t} \\
+\sigma_k & = \sqrt{\frac{c_k^t}{a_k^t} - \mu_k^2}
+\end{split}
+\end{equation}
+
+```{r parameter estimates}
+estimate_parameters <- function(global_sufficient_statistics) {
+    
+    # Initialize vectors for means, standard deviations, and probabilities
+    means <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    stds <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    probs <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    
+    for (k in 1:length(global_sufficient_statistics$global_suff_stat_one)) {
+        mean <- global_sufficient_statistics$global_suff_stat_two[k] / global_sufficient_statistics$global_suff_stat_one[k]
+        var <- (global_sufficient_statistics$global_suff_stat_three[k] / global_sufficient_statistics$global_suff_stat_one[k]) - (mean^2)
+        std <- sqrt(var)
+        prob <- global_sufficient_statistics$global_suff_stat_one[k] / sum(global_sufficient_statistics$global_suff_stat_one)
+        
+        # Assign calculated values to the respective vectors
+        means[k] <- mean
+        stds[k] <- std
+        probs[k] <- prob
+    }
+    
+    return(list("mixing_probs" = probs,
+                "means" = means,
+                "stds" = stds))
+}
+
+### Test
+# global_sufficient_statistics <- calculate_global_statistics(local_suff_node_1, local_suff_node_2,
+#                             local_suff_node_3, local_suff_node_4)
+# print("Estimate")
+# estimates <- estimate_parameters(global_sufficient_statistics = global_sufficient_statistics)
+# estimates
+# print("True")
+# params
+```
+## Test full code (using vectorisation)
+
+Run the code in a a full GMM setting. Using vectorisation calculate data belongings and local sufficient statistics (functions that run on the worker nodes).
+
+Functions:
+
+1. GMM_using_vectorisation
+2. calculate_log_likelihood (need to figure out a way to calculate this using sufficient statistics)
+
+### calculate_log_likelihood
+
+* calculates the current log likelihood given the data and current parameter estimates
+
+```{r calculate log likelihood}
+calculate_likelihood <- function(data, params) {
+    mu <- params$means
+    sigma <- params$stds
+    weight <- params$mixing_probs
+    k <- length(mu)
+    n <- length(data)
+    likelihood <- numeric(n)
+    for (i in 1:n) {
+        point_likelihood <- 0
+        for (j in 1:k) {
+            component_density <- weight[j] * dnorm(data[i], mean = mu[j], sd = sigma[j])
+            point_likelihood <- point_likelihood + component_density
+        }
+        likelihood[i] <- point_likelihood
+    }
+    return(sum(log(likelihood)))
+}
+
+### Test
+# print("loglikelihood with initial estimates")
+# calculate_likelihood(data = unlist(data_nodes), params = params_init)
+# print("loglikelihood with first updated estimates")
+# calculate_likelihood(data = unlist(data_nodes), params = estimates)
+```
+
+```{r GMM_vectorisation}
+GMM_using_vectorisation <- function(data,
+                                    tol = 0.05,
+                                    max_iter = 1000,
+                                    params_init){
+    parameters <- params_init
+    full_data <- unlist(data)
+    
+    iteration <- 0
+    log_likelihood_old <- calculate_likelihood(data = full_data, 
+                                               params = parameters)
+    likelihood_performance <- cbind(iteration, log_likelihood_old)
+    print(likelihood_performance)
+    
+    log_likelihood_diff <- 100000
+    while(log_likelihood_diff > 0.05){
+        iteration <- iteration + 1
+        # E-step (done on workers)
+        local_sufficient_statistics <- lapply(1:m, 
+                                              function(x) calculate_node_local_sufficient_statistics(data=data_nodes[[x]],
+                                                                                                     params = params_init))
+        # Get global sufficient statistics (manager node)
+        global_sufficient_statistics <- calculate_global_statistics(local_node_1 <- local_sufficient_statistics[[1]],
+                                                                    local_node_2 <- local_sufficient_statistics[[2]],
+                                                                    local_node_3 <- local_sufficient_statistics[[3]],
+                                                                    local_node_4 <- local_sufficient_statistics[[4]])
+        
+        # Update parameters
+        parameters <- estimate_parameters(global_sufficient_statistics = global_sufficient_statistics)
+        log_likelihood_new <- calculate_likelihood(data = full_data, 
+                                                   params = parameters)
+        likelihood_performance <- rbind(likelihood_performance, cbind(
+            iteration, log_likelihood_new
+        ))
+        log_likelihood_diff <- abs(log_likelihood_new - log_likelihood_old)
+        if (log_likelihood_new < log_likelihood_old){
+            'Montonicity is not being met'
+        }
+        log_likelihood_old <- log_likelihood_new
+    }
+    return(list("parameters" = parameters, 
+                "performance" = likelihood_performance))
+    
+}
+
+### Test
+results <- GMM_using_vectorisation(data = data_nodes,
+                                   params_init = params_init)
+results$parameters
+results$performance
+
+plot(x = results$performance[,1],
+     y = results$performance[,2])
+
+plot_data_GMM(data = unlist(data_nodes), K, params) # true values
+plot_data_GMM(data = unlist(data_nodes), K, results$parameters) # estimates
+```
+## GMM using parallel computing
+
+Steps:
+
+1. Setup the cluster.
+2. Broadcast the initial parameters to the worker nodes.
+3. Iteratively perform E-step in parallel on the worker nodes, gather the local sufficient statistics, and aggregate them on the manager node.
+4. Update the parameters and check for convergence on the manager node.
+5. Broadcast the updated parameters back to the worker nodes
+
+```{r parallel}
+
+detectCores() # 8 cores
+# Main GMM function using parallel processing
+GMM_using_parallel <- function(data, params_init,
+                               tol = 0.05,
+                               max_iter = 1000,
+                               worker_nodes = length(data)){
+    parameters <- params_init
+    print(parameters)
+    full_data <- unlist(data)
+    
+    iteration <- 0
+    log_likelihood_old <- calculate_likelihood(data = full_data, params = parameters)
+    likelihood_performance <- cbind(iteration, log_likelihood_old)
+    
+    log_likelihood_diff <- 10000
+    
+    # Set up cluster
+    cl <- makeCluster(worker_nodes, type = "PSOCK")
+    clusterExport(cl, list("calculate_node_local_sufficient_statistics", "calculate_data_belongings", "calculate_likelihood", "calculate_global_statistics", "estimate_parameters"))
+    
+    while(log_likelihood_diff > tol && iteration < max_iter){
+        iteration <- iteration + 1
+        
+        # Export current parameters to the workers
+        clusterExport(cl, varlist = "parameters", envir = environment())
+        
+        # E-Step (done on workers)
+        local_sufficient_statistics <- parLapply(cl, data, function(d){
+            calculate_node_local_sufficient_statistics(data = d, params = parameters)
+        })
+        
+        # Get global sufficient statistics (manager node)
+        global_sufficient_statistics <- do.call(calculate_global_statistics, local_sufficient_statistics)
+        
+        # Update the parameters
+        parameters <- estimate_parameters(global_sufficient_statistics = global_sufficient_statistics)
+        log_likelihood_new <- calculate_likelihood(data = full_data, params = parameters)
+        likelihood_performance <- rbind(likelihood_performance, cbind(iteration, log_likelihood_new))
+        log_likelihood_diff <- abs(log_likelihood_new - log_likelihood_old)
+        
+        if (log_likelihood_new < log_likelihood_old) {
+            print('Monotonicity is not being met')
+        }
+        
+        log_likelihood_old <- log_likelihood_new
+    }
+    stopCluster(cl)
+    
+    return(list("parameters" = parameters,
+                "performance" = likelihood_performance))
+}
+
+### Test
+# Ensure data_nodes and params_init are defined
+# data_nodes <- list(node1_data, node2_data, node3_data, node4_data)
+# params_init <- list(...)  # Initialize with appropriate values
+
+results <- GMM_using_parallel(data = data_nodes, params_init = params_init)
+results$parameters
+results$performance
+
+plot(x = results$performance[,1], y = results$performance[,2])
+
+plot_data_GMM(data = unlist(data_nodes), K, params) # true values
+plot_data_GMM(data = unlist(data_nodes), K, results$parameters) # estimates
+
+### plotting data belongings and joint distribution
+belongings <- calculate_data_belongings(params = results$parameters, data = unlist(data_nodes))
+data <- data.frame(x = unlist(data_nodes), y1 = belongings[,1], y2 = belongings[,2])
+ggplot(data) +
+  geom_line(aes(x = x, y = y1, color = "Component 1")) +
+  geom_line(aes(x = x, y = y2, color = "Component 2")) +
+  labs(
+    title = "Line Plot of Probabilities of Data Points Belonging to Components",
+    x = "Data",
+    y = "Probability of Belonging"
+  ) +
+  scale_color_manual(values = c("Component 1" = "blue", "Component 2" = "red")) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+# Load necessary library
+library(ggplot2)
+
+# Function to calculate the predicted density
+calculate_prediction <- function(data, params){
+    n_components <- length(params$means)
+    prediction <- rep(0, length(data))
+    for (i in 1:n_components){
+        prediction <- prediction + (params$mixing_probs[i] * dnorm(data, 
+                                                                   mean = params$means[i],
+                                                                   sd = params$stds[i]))  
+    }
+    return(prediction)
+}
+
+# Assuming results$parameters and data_nodes are already defined
+densities <- calculate_prediction(unlist(data_nodes), params = results$parameters)
+
+# Create a data frame for ggplot
+data_frame <- data.frame(
+  x = unlist(data_nodes),
+  density = densities
+)
+
+# Plot histogram with density estimation line using ggplot2
+ggplot(data_frame, aes(x = x)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "lightblue", color = "black", alpha = 0.7) +
+  geom_line(aes(y = density), color = "red", size = 1) +
+  labs(
+    title = "Histogram and Density Estimation of GMM",
+    x = "Value",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+```
+

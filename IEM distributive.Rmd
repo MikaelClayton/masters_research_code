@@ -1,0 +1,425 @@
+---
+title: "Distributed IEM"
+author: "Bronwyn McCall"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# IEM algorithm:
+1. Have initial values for local and global sufficient statistics. (and parameters).
+2. Have data stored on different nodes.
+3. Start at node one and calculate the local sufficient statistics.
+    3.1 update the local sufficient statistics 
+    3.2 upate the global sufficient statistics
+4. Update the parameter estimates
+5. Check convergence. If not met, then send to the next node.
+
+```{r libaries}
+library(ggplot2)
+```
+## Generate the data
+```{r data}
+set.seed(123)
+
+# SET MODEL HYPERPARAMETERS AND SETTINGS
+K <- 2 # number of components
+n <- 1000 # sample size
+m <- 4 # number of nodes
+n_m <- n/m # sample size per node
+
+# TRUE PARAMETERS
+pi_1 <- 0.3
+pi_2 <- 1 - pi_1
+mu_1 <- 0
+mu_2 <- 2
+si_1 <- 1
+si_2 <- 2
+probs <- c(pi_1, pi_2)
+means <- c(mu_1, mu_2)
+stds <- c(si_1, si_2)
+params <- list("mixing_probs" = probs, "means" = means, "stds" = stds)
+
+# PARAMETER STARTING VALUES
+pi_1_init <- 0.5
+pi_2_init <- 0.5
+mu_1_init <- 0.2
+mu_2_init <- 1.5
+si_1_init <- 1
+si_2_init <- 1.5
+probs_init <- c(pi_1_init, pi_2_init)
+means_init <- c(mu_1_init, mu_2_init)
+stds_init <- c(si_1_init, si_2_init)
+params_init <- list("mixing_probs" = probs_init,
+                    "means" = means_init,
+                    "stds" = stds_init)
+
+# GENERATING DATA
+generate_data <- function(means, stds, probs, n){
+  ## Ensure different parameter lengths match
+    if(length(means) != length(stds) || length(means) != length(probs)){
+        stop("Number of means, standard deviations and components probabilities 
+             must be equal.")
+  }
+    data <- matrix(nrow = n)
+    for(i in 1:n){
+        component <- rmultinom(1, 1, probs) + 1
+        data[i] <- rnorm(1, mean = means[component], sd = stds[component])
+  }
+    return(data)
+}
+
+data_nodes <- lapply(1:m, function(x) generate_data(means, stds, probs, n_m))
+
+# PLOT DATA
+plot_data_GMM <- function(data, n_components, params, overlay = TRUE,
+                      freq = FALSE){
+  ## Extracting parameters
+  means <- params$means
+  stds <- params$stds
+  probs <- params$mixing_probs
+  ## Histogram
+  hist(data, breaks = 50, col = "lightblue", xlab = "Value", 
+       main = "Histogram of two-component univariate Gaussian mixture model",
+       freq = freq)
+  ## Overlayed line plot
+  if (overlay) {
+    colors <- rainbow(n_components)
+    for (i in 1:n_components){
+      curve(dnorm(x, mean = means[i], sd = stds[i])*probs[i], add = TRUE, 
+            col = colors[i], lwd = 2)
+    }
+  }
+}
+
+
+## Plots
+plot_data_GMM(data = data_nodes[[1]], K, params) # data node 1
+plot_data_GMM(data = data_nodes[[2]], K, params) # data node 2
+plot_data_GMM(data = data_nodes[[3]], K, params) # data node 3
+plot_data_GMM(data = data_nodes[[4]], K, params) # data node 4
+plot_data_GMM(data = unlist(data_nodes), K, params) # all data
+```
+
+## Functions to get local sufficient statistics
+
+Functions:
+
+1. calculate_data_belonings
+2. calculate_node_local_sufficient_statistics
+
+### Calculate data belongings
+* Used on each worker node
+* Calculates the data points conditional component belongings (probabilities) based on the data and the current parameter estimates
+* For each data point $\sum_k^K \pi_k = 1$ and $\pi_k \in [0, 1]$
+```{r data belongings}
+calculate_data_belongings <- function(params, data){
+
+  
+  ### Extracting parameters and checking if they are they same.
+  means <- params$means
+  stds <- params$stds
+  probs <- params$mixing_probs
+  if (length(means) != length(stds) || length(means) != length(probs)){
+    stop("Number of means, standard deviations, and weights must be equal.")
+  }
+  
+  ### Get the data sample and number of components
+  n_components <- length(means) 
+  n <- length(data)
+  
+  ### Calculating the belongings 
+  gamma_num <- matrix(nrow = n, ncol = n_components)
+  for(i in 1:n_components){
+    gamma_num[,i] <- probs[i] * dnorm(data, mean = means[i], sd = stds[i])
+  }
+  gamma_den <- rowSums(gamma_num)
+  gamma <- gamma_num / gamma_den
+  
+  ### Check if data belongings sum to 1 (have grace for rounding errors).
+  if (any(abs(rowSums(gamma) - 1) > .Machine$double.eps * n)){
+      stop("Calculated belongings for each data point do not sum to 1.")
+  }
+  
+  ### Check if any data belonging is negative
+  if (any(gamma < 0)){
+      stop("Calculated belongings contain negative values.")
+  }
+  return(gamma)
+}
+
+### test (vectorisation)
+# lapply(1:m, function(x) calculate_data_belongings(params = params_init, data = data_nodes[[x]]))
+
+### test (IEM)
+for(i in 1:m){
+    belongings = calculate_data_belongings(params = params_init, data = data_nodes[[i]])
+    print(belongings)
+}
+```
+
+### calculate_node_local_sufficient_statistics
+
+* For each node it calculates the nodes respective local sufficient statistics
+\begin{equation}
+\begin{split}
+a_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t} \\
+b_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t}y_{m,i} \\
+c_{m,k}^t & = \sum_{i=1}^{N_m} \gamma_{m,i,k}^{t}y_{m,i}^2 
+\end{split}
+\end{equation}
+
+```{r node local statistics}
+calculate_node_local_sufficient_statistics <- function(data, params){
+    ### Calculating the data belongings
+    belongings <- calculate_data_belongings(params = params, data = data)
+    
+    ### Calculating the local sufficient statistics for the node
+    #### Number 1: sum of data belongings
+    sufficient_stat_one <- colSums(belongings)
+    
+    #### Number 2: sum of product (data and data belongings)
+    sufficient_stat_two <- colSums(belongings * matrix(data, nrow = length(data), ncol = ncol(belongings), byrow = FALSE))
+    
+    #### Number 3: sum of product (data squared and data belongings)
+    sufficient_stat_three <- colSums(belongings * matrix(data^2, nrow = length(data), ncol = ncol(belongings), byrow = FALSE))
+    
+    if(sum(sufficient_stat_one) != length(data)){
+        stop("The sum of the first sufficient statistic does not equal node sample size")
+    }
+    
+    if(any(sufficient_stat_three < 0)){
+        stop("Third sufficient statistic is negative")
+    }
+    return(list("suff_stat_one" = sufficient_stat_one, 
+                "suff_stat_two" = sufficient_stat_two,
+                "suff_stat_three" = sufficient_stat_three)
+    )
+}
+
+### test
+for (i in 1:m){
+    local_sufficient_stat <- calculate_node_local_sufficient_statistics(data = data_nodes[[i]], params = params_init)
+    print(local_sufficient_stat)
+}
+```
+
+## Functions to get updated parameter estimates
+
+Functions:
+
+1. calculate_global_statistics (update function)
+2. estimate_parameters 
+
+### estimate_parameters
+```{r estimate_parameters}
+estimate_parameters <- function(global_sufficient_statistics) {
+    
+    # Initialize vectors for means, standard deviations, and probabilities
+    means <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    stds <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    probs <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
+    
+    for (k in 1:length(global_sufficient_statistics$global_suff_stat_one)) {
+        mean <- global_sufficient_statistics$global_suff_stat_two[k] / global_sufficient_statistics$global_suff_stat_one[k]
+        var <- (global_sufficient_statistics$global_suff_stat_three[k] / global_sufficient_statistics$global_suff_stat_one[k]) - (mean^2)
+        std <- sqrt(var)
+        prob <- global_sufficient_statistics$global_suff_stat_one[k] / sum(global_sufficient_statistics$global_suff_stat_one)
+        
+        # Assign calculated values to the respective vectors
+        means[k] <- mean
+        stds[k] <- std
+        probs[k] <- prob
+    }
+    
+    return(list("mixing_probs" = probs,
+                "means" = means,
+                "stds" = stds))
+}
+```
+
+### calculate_global_statistics
+
+* gets new local sufficient statistic then updates the global sufficient statistics:
+\begin{equation}
+global\_stat^{new} = global\_stat^{old} + local\_stat^{new} - local\_stat^{old}
+\end{equation}
+
+```{r global_sufficient_stat}
+update_global_statistics <- function(global_statistics_old,
+                                     local_statistics_old,
+                                     local_statistics_new,
+                                     data_node,
+                                     params){
+    
+    global_suff_stat_one <- global_statistics_old[[1]] + local_statistics_new[[1]] - local_statistics_old[[1]]
+    global_suff_stat_two <- global_statistics_old[[2]] + local_statistics_new[[2]] - local_statistics_old[[2]]
+    global_suff_stat_three <- global_statistics_old[[3]] + local_statistics_new[[3]] - local_statistics_old[[3]]
+    
+    if(sum(global_suff_stat_one) <= 0){
+        stop("The sum of the first global sufficient statistics must be positive")
+    }
+    
+    if(any(global_suff_stat_three < 0)){
+        stop("Third global sufficient statistics is negative")
+    }
+    return(list("global_suff_stat_one" = global_suff_stat_one,
+                "global_suff_stat_two" = global_suff_stat_two,
+                "global_suff_stat_three" = global_suff_stat_three))
+}
+global_statistic_old <- list('global_suff_stat_one' = 0, 
+                             'global_suff_stat_two' = 0,
+                             'global_suff_stat_three' = 0)
+
+## Test
+#Have local statistics old
+local_statistics_old <- lapply(1:m, function(x) calculate_node_local_sufficient_statistics(data_nodes[[x]],
+                                                                                           params = params_init))
+local_statistics_old
+#Get global statistics old
+for(i in 1:m){
+    local_sufficient_stat <- calculate_node_local_sufficient_statistics(data = data_nodes[[i]], params = params_init)
+    global_statistic_old$global_suff_stat_one <- global_statistic_old$global_suff_stat_one + local_sufficient_stat$suff_stat_one
+    global_statistic_old$global_suff_stat_two <- global_statistic_old$global_suff_stat_two + local_sufficient_stat$suff_stat_two
+    global_statistic_old$global_suff_stat_three <- global_statistic_old$global_suff_stat_three + local_sufficient_stat$suff_stat_three
+}
+#Get params from global statistics old
+params_update <- estimate_parameters(global_statistic_old)
+#Get local statistics for node 1 (new)
+local_statistics_new <- calculate_node_local_sufficient_statistics(data = data_nodes[[1]], params = params_update)
+local_statistics_new
+#Update global statistics
+global_statistic_new <- update_global_statistics(global_statistic_old,
+                                                 local_statistics_old[[1]],
+                                                 local_statistics_new,
+                                                 data_nodes[[1]],
+                                                 params_update)
+global_statistic_old
+local_statistics_old[[1]]
+global_statistic_new
+```
+## Functions to check convergence
+1. calculate_log_likelihood -> need to figure out the joint log-likelihood equation with global sufficient statistics / local sufficient statistics. 
+2. iem_algorithm (main function) => compare difference in parameters. 
+
+### Calculate log-likelihood (needs to be reworked)
+```{r calculate_log_likelihood}
+calculate_likelihood <- function(data, params) {
+    mu <- params$means
+    sigma <- params$stds
+    weight <- params$mixing_probs
+    k <- length(mu)
+    n <- length(data)
+    likelihood <- numeric(n)
+    for (i in 1:n) {
+        point_likelihood <- 0
+        for (j in 1:k) {
+            component_density <- weight[j] * dnorm(data[i], mean = mu[j], sd = sigma[j])
+            point_likelihood <- point_likelihood + component_density
+        }
+        likelihood[i] <- point_likelihood
+    }
+    return(sum(log(likelihood)))
+}
+
+### test
+likelihood_old <- calculate_likelihood(data_nodes[[1]], 
+                                       params = params_init)
+likelihood_update <- calculate_likelihood(data_nodes[[1]],
+                                          params = params_update)
+print(likelihood_old)
+print(likelihood_update)
+```
+
+### IEM algorithm 
+```{r iem_distributed_model}
+iem_distributed_model <- function(data,
+                                  initial_local_statistics,
+                                  initial_global_statistics,
+                                  initial_params,
+                                  max_iter = 10){
+    n_nodes <- length(data)
+    params_old <- initial_params
+    global_statistics_old <- initial_global_statistics
+    local_statistics_set <- initial_local_statistics
+
+    likelihood <- calculate_likelihood(data = unlist(data),
+                                       params = params_old)
+    iteration_outer <- 0
+    iteration_inner <- 0
+    results <- cbind(iteration_outer, iteration_inner, likelihood)
+    params_diff <- 10000
+    while (iteration_outer < max_iter){
+        iteration_outer <- iteration_outer + 1
+        iteration_inner <- 0
+        for (i in 1:n_nodes){
+            iteration_inner <- iteration_inner + 1
+            local_statistics_old <- local_statistics_set[[i]]
+            local_statistics_new <- calculate_node_local_sufficient_statistics(data = data[[i]],
+                                                                                    params = params_old)
+            global_statistics_new <- update_global_statistics(global_statistics_old = global_statistics_old,
+                                                             local_statistics_old = local_statistics_old,
+                                                             local_statistics_new = local_statistics_new,
+                                                             data_node = data[[i]],
+                                                             params = params_old)
+            params_new <- estimate_parameters(global_sufficient_statistics = global_statistics_new)
+            likelihood <- calculate_likelihood(data = unlist(data),
+                                               params = params_new)
+            results <- rbind(results, cbind(iteration_outer,
+                                            iteration_inner,
+                                            likelihood))
+            params_diff <- max(abs(unlist(params_new) - unlist(params_old)))
+            print(params_new)
+            if (params_diff < 0.05){
+                break
+            }
+            local_statistics_set[[i]] <- local_statistics_new
+            params_old <- params_new
+        }
+    }
+    return(list('results' = results, 'params' = params_new))
+}
+### Test
+initial_local_statistics <- lapply(1:m, function(x) calculate_node_local_sufficient_statistics(data_nodes[[x]],
+                                                                                           params = params_init))
+initial_global_statistics <- list('global_suff_stat_one' = 0, 
+                             'global_suff_stat_two' = 0,
+                             'global_suff_stat_three' = 0)
+
+for(i in 1:m){
+    local_sufficient_stat <- calculate_node_local_sufficient_statistics(data = data_nodes[[i]], params = params_init)
+    initial_global_statistics$global_suff_stat_one <- global_statistic_old$global_suff_stat_one + local_sufficient_stat$suff_stat_one
+    initial_global_statistics$global_suff_stat_two <- global_statistic_old$global_suff_stat_two + local_sufficient_stat$suff_stat_two
+    initial_global_statistics$global_suff_stat_three <- global_statistic_old$global_suff_stat_three + local_sufficient_stat$suff_stat_three
+}
+initial_params <- estimate_parameters(initial_global_statistics)
+iem_model_results <- iem_distributed_model(data = data_nodes,
+                                           initial_local_statistics = initial_local_statistics,
+                                           initial_global_statistics = initial_global_statistics,
+                                           initial_params = initial_params)
+
+```
+## Results 
+### The performance of the true params
+```{r true_performance}
+### With true
+calculate_likelihood(data=unlist(data_nodes), params = params)
+plot_data_GMM(data = unlist(data_nodes), K, params)
+```
+### The performance of the initial params
+```{r initial_performance}
+
+### Initial
+calculate_likelihood(data=unlist(data_nodes), params = params_init)
+plot_data_GMM(data = unlist(data_nodes), K, params = params_init)
+```
+### The performance of the estimated params
+```{r estimated_performance}
+
+### Estimated
+iem_model_results$results
+plot_data_GMM(data = unlist(data_nodes), K, iem_model_results$params)
+```
