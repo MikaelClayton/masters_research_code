@@ -1,0 +1,177 @@
+---
+title: "Multivariate GMM distributed EM"
+author: "Bronwyn McCall"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Getting data 
+
+```{r libraries}
+library(MASS)
+library(mvtnorm)
+```
+```{r generating data}
+#first cluster
+mu1=c(0,0,0,0)
+sigma1=matrix(c(3,0,0,0,0,3,0,0,0,0,3,0,0,0,0,3),ncol=4,nrow=4, byrow=TRUE)
+norm1=mvrnorm(30, mu1, sigma1)
+sigma1
+
+
+#second cluster
+mu2=c(7,7,7,7)
+sigma2=sigma1
+norm2=mvrnorm(30, mu2, sigma2)
+
+#third cluster
+mu3=c(3,3,3,3)
+sigma3=sigma1
+norm3=mvrnorm(30, mu3, sigma3)
+
+#data
+norms=rbind(norm1,norm2,norm3) #combine the 3 mixtures together
+N=90 #total number of data points 
+Dim=4 #number of dimensions
+y=array(as.vector(norms), dim=c(N,Dim))
+mixture_data=list(N=N, D=4, K=3, y=y)
+
+means <- list(mu1, mu2, mu3)
+covs <- list(sigma1, sigma2, sigma3)
+mixing_probs <- list(0.33, 0.33, 1-0.33-0.33)
+params <- list("means" = means, "covs" = covs, "mixing_probs" = mixing_probs)
+norms
+params
+```
+
+## Functions to get local sufficient statistics
+
+Function:
+
+1. calculate_data_belonings
+2. calculate_node_local_sufficient_statistics
+
+### Calculate_data_belongings
+* Used on each worker node 
+* Calculates the data points conditional component belongings based on data and current parameter estimate
+
+```{r data_belongings}
+calculate_data_belongings <- function(data, params){
+    means <- params$means
+    covs <- params$covs
+    mixing_probs <- params$mixing_probs
+    
+    if (length(means) != length(covs) || length(means) != length(mixing_probs)){
+        stop("Number of means, standard deviations, and weights must be equal.")
+    }
+    
+    n_components <- length(means)
+    n <- nrow(data)
+    
+    gamma_num <- matrix(nrow = n, ncol = n_components)
+    for(i in 1:n_components){
+        gamma_num[,i] <- mixing_probs[[i]] * 
+            dmvnorm(data, mean = means[[i]], sigma = covs[[i]])
+    }
+    gamma_den <- rowSums(gamma_num)
+    gamma <- gamma_num / gamma_den
+    
+    ### Check if data belongings sum to 1 (have grace for rounding errors).
+    if (any(abs(rowSums(gamma) - 1) > .Machine$double.eps * n)){
+        stop("Calculated belongings for each data point do not sum to 1.")
+    }
+  
+    ### Check if any data belonging is negative
+    if (any(gamma < 0)){
+        stop("Calculated belongings contain negative values.")
+    }
+    return(gamma)
+}
+
+belongings <- calculate_data_belongings(data = norms, params = params)
+belongings
+```
+### calculate_node_local_statistics
+* Used on worker nodes
+* For each worker node it calculates the nodes respective local sufficient statistics
+```{r local_sufficient_statistics}
+calculate_node_local_sufficient_statistics <- function(data, params){
+    n_components <- length(params$means)
+    sufficient_stat_one <- vector('list', length = n_components)
+    sufficient_stat_two <- vector('list', length = n_components)
+    sufficient_stat_three <- vector('list', length = n_components)
+    ### Calculating the data belongings
+    belongings <- calculate_data_belongings(params = params, data = data)
+    
+    ### Calculating the local sufficient statistics for the node
+    for(i in 1:n_components){
+        #### Number 1: sum of data belongings
+        sufficient_stat_one[[i]] <- sum(belongings[,i])
+    
+        #### Number 2: sum of product (data and data belongings)
+        sufficient_stat_two[[i]] <- colSums(belongings[,i] * data)
+    
+        #### Number 3: sum of product (data squared and data belongings)
+        sufficient_stat_three[[i]] <- t(data)%*%diag(belongings[,i])%*%data
+    }
+    
+    
+    if(sum(unlist(sufficient_stat_one)) != nrow(data)){
+        stop("The sum of the first sufficient statistic does not equal node sample size")
+    }
+    
+    # if(any(unlist(sufficient_stat_three) < 0)){
+    #     stop("Third sufficient statistic is negative")
+    # }
+    return(list("suff_stat_one" = sufficient_stat_one, 
+                "suff_stat_two" = sufficient_stat_two,
+                "suff_stat_three" = sufficient_stat_three)
+    )
+}
+local_sufficient_statistics <- calculate_node_local_sufficient_statistics(data = norms, params = params)
+local_sufficient_statistics
+```
+## Functions to get updated parameter estimates
+
+Functions:
+
+1. calculate_global_statistics (sum of local statistics)
+2. estimate_parameters
+
+### calculate_global_statistics
+
+* done on manager node 
+* gets the local statistics calculated on each node and sum them together to get the global statistics
+
+```{r calculate_global_statistics}
+print('Still need to implement')
+```
+
+### estimate_parameters
+
+* done on manager node
+* updates the GMM parameter estimates using the global sufficient statistics
+
+```{r estimate_parameters}
+estimate_parameters <- function(global_sufficient_statistics){
+    n_components <- length(global_sufficient_statistics)
+    
+    means <- vector('list', length = n_components)
+    covs <- vector('list', length = n_components)
+    mixing_probs <- vector('list', length = n_components)
+    
+    for (i in 1:n_components){
+        means[[i]] <- global_sufficient_statistics$suff_stat_two[[i]]/global_sufficient_statistics$suff_stat_one[[i]]
+        covs[[i]] <- global_sufficient_statistics$suff_stat_three[[i]]/global_sufficient_statistics$suff_stat_one[[i]] - means[[i]]%*%t(means[[i]])
+        mixing_probs <- global_sufficient_statistics$suff_stat_one[[i]]/sum(unlist(global_sufficient_statistics$suff_stat_one))
+    }
+    return(list("means" = means, "covs" = covs, "mixing_probs" = mixing_probs))
+}
+
+parameters <- estimate_parameters(local_sufficient_statistics)
+parameters
+```
