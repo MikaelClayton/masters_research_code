@@ -9,21 +9,10 @@
 #     6. TODO: calculate_log_likelihood_with_sufficient_statistics
 
 # Libraries
-library(docstring)
+library(mvtnorm)
 
+######### UNIVARIATE #########
 calculate_data_belongings <- function(params, data){
-    #' Calculate component responsibilities for Univariate Gaussian Mixture Model
-    #' 
-    #' @description
-    #' The function calculates the probability that a data point belongs to
-    #' to specified component.
-    #' 
-    #' This is based on the data and the current parameter estimates.
-    #'
-    #'@param params list. A list of the different components params. Mean, sd and pi
-    #'@param data matrix or vector. Matrix if multivariate and vector if univariate
-    #'
-    #'@return data_belongings matrix. A column for each component and row for data points.
     
     ### Extracting parameters and checking if they are they same.
     means <- params$means
@@ -58,21 +47,6 @@ calculate_data_belongings <- function(params, data){
 }
 
 calculate_node_local_sufficient_statistics <- function(data, params){
-    #' Calculate sufficient statistics for Univariate Gaussian Mixture Modelling
-    #' 
-    #' @description
-    #' The function calculates the local sufficient statistics for a univariate
-    #' Gaussian mixture model. This is:
-    #' 1. Sum of component belonginings
-    #' 2. Sum of the product of component belongings and data points.
-    #' 3. Sum of the product of component belongins and data points squared.
-    #'
-    #' This is based on the data and the current parameter estimates.
-    #'
-    #'@param params list. A list of the different components params. Mean, sd and pi
-    #'@param data matrix or vector. Matrix if multivariate and vector if univariate
-    #'
-    #'@return sufficient_statistics list. Each element is a set of one of the the ss.
     
     ### Calculating the data belongings
     belongings <- calculate_data_belongings(params = params, data = data)
@@ -101,20 +75,6 @@ calculate_node_local_sufficient_statistics <- function(data, params){
 }
 
 estimate_parameters_with_sufficient_statistics <- function(global_sufficient_statistics){
-    #' Reestimate parameters for univariate Gaussian Mixture Model.
-    #' 
-    #' @description
-    #' The function re-estimates univariate GMM parameters. This is:
-    #' 1. The components' mixing probabilities.
-    #' 2. The components' means.
-    #' 3. The components' standard deviations.
-    #'
-    #' This is based on the sufficient statistics for the full dataset.
-    #'
-    #'@param params list. A list of the different components params. Mean, sd and pi
-    #'@param data matrix or vector. Matrix if multivariate and vector if univariate
-    #'
-    #'@return new_parameter_estimates list. List with mixing_probs, means, sds.
     
     # Initialize vectors for means, standard deviations, and probabilities
     means <- numeric(length(global_sufficient_statistics$global_suff_stat_one))
@@ -140,18 +100,6 @@ estimate_parameters_with_sufficient_statistics <- function(global_sufficient_sta
 
 
 calculate_log_likelihood_with_full_data <- function(data, params){
-    #' Calculate log-likelihood for univariate Gaussian Mixture Model.
-    #' 
-    #' @description
-    #' The function calculates the log-likelihood for a univariate 
-    #' Gaussian mixture model.
-    #'
-    #' This is based on the data and the current parameter estimates.
-    #'
-    #'@param params list. A list of the different components params. Mean, sd and pi
-    #'@param data matrix or vector. Matrix if multivariate and vector if univariate
-    #'
-    #'@return log-likelihood float.
     
     # Initialize vectors for means, standard deviations, and probabilities
     mu <- params$means
@@ -170,4 +118,125 @@ calculate_log_likelihood_with_full_data <- function(data, params){
     }
     return(sum(log(likelihood)))
 }
+
+######### MULTIVARIATE #########
+calculate_data_belongings_multivariate <- function(params, data) {
+  
+  # Extracting parameters
+  means <- params$means
+  covs <- params$covs
+  probs <- params$mixing_probs
+  
+  # Ensure the number of means, covariances, and probabilities are the same
+  if (length(means) != length(covs) || length(means) != length(probs)) {
+    stop("Number of means, covariance matrices, and component probabilities must be equal.")
+  }
+  
+  # Number of components and data points
+  n_components <- length(means)
+  n <- nrow(data)
+  
+  # Initialize a matrix to store the numerator for gamma
+  gamma_num <- matrix(nrow = n, ncol = n_components)
+  
+  # Calculate the numerator for each component
+  for (i in 1:n_components) {
+    gamma_num[, i] <- probs[i] * dmvnorm(data, mean = means[[i]], sigma = covs[[i]])  
+  }
+  
+  # Calculate the denominator (sum across all components for each data point)
+  gamma_den <- rowSums(gamma_num)
+  
+  # Calculate gamma (posterior probabilities for each component)
+  gamma <- gamma_num / gamma_den
+  
+  # Check if gamma rows sum to 1 (allowing small rounding errors)
+  if (any(abs(rowSums(gamma) - 1) > .Machine$double.eps * n)) {
+    stop("Calculated belongings for each data point do not sum to 1.")
+  }
+  
+  # Check for negative values in gamma
+  if (any(gamma < 0)) {
+    stop("Calculated belongings contain negative values.")
+  }
+  
+  return(gamma)
+}
+
+calculate_log_likelihood_with_full_data_multivariate <- function(data, params) {
+  
+  # Initialize parameters for means, covariances, and mixing probabilities
+  mu <- params$means
+  sigma <- params$covs
+  weight <- params$mixing_probs
+  k <- length(mu)  # Number of components in the mixture
+  n <- nrow(data)  # Number of data points
+  likelihood <- numeric(n)  # To store the likelihood for each data point
+  
+  for (i in 1:n) {
+    point_likelihood <- 0
+    for (j in 1:k) {
+      # Compute the component density using dmvnorm for multivariate normal
+      component_density <- weight[j] * dmvnorm(data[i, ], mean = mu[[j]], sigma = sigma[[j]])
+      point_likelihood <- point_likelihood + component_density
+    }
+    likelihood[i] <- point_likelihood
+  }
+  
+  # Return the total log-likelihood by summing over the log of individual likelihoods
+  return(sum(log(likelihood)))
+}
+
+calculate_node_local_sufficient_statistics_multivariate <- function(data, params){
+  ### Initiate needed values
+  sufficient_stat_two <- list()
+  sufficient_stat_three <- list()
+  means <- params$means
+  
+  ### Calculating the data belongings
+  belongings <- calculate_data_belongings_multivariate(params = params, data = data)
+  k <- ncol(belongings)
+  
+  ### Calculating the local sufficient statistics for the node
+  #### Number 1: sum of data belongings
+  sufficient_stat_one <- colSums(belongings)
+  
+  for(i in 1:k){
+    #### Number 2: sum of product (data and data belongings)
+    sufficient_stat_two[[i]] <- colSums(belongings[, i] * data)
+    #### Number 3: sum of product (data squared and data belongings)
+    sufficient_stat_three[[i]] <- t(belongings[,i]*(data - means[[i]]))%*%(data - means[[i]])
+  }
+  
+  if(sum(sufficient_stat_one) != nrow(data)){
+    stop("The sum of the first sufficient statistic does not equal node sample size")
+  }
+  
+  return(list("suff_stat_one" = sufficient_stat_one, 
+              "suff_stat_two" = sufficient_stat_two,
+              "suff_stat_three" = sufficient_stat_three)
+  )
+}
+
+estimate_parameters_with_sufficient_statistics_multivariate <- function(global_sufficient_statistics){
+  
+  # Initialize vectors for means, standard deviations, and probabilities
+  means <- list()
+  covs <- list()
+  probs <- c()
+  k <- length(global_sufficient_statistics$global_suff_stat_one)
+  
+  for (i in 1:k) {
+    means[[i]] <- global_sufficient_statistics$global_suff_stat_two[[i]] / global_sufficient_statistics$global_suff_stat_one[i]
+    covs[[i]] <- global_sufficient_statistics$global_suff_stat_three[[i]] / global_sufficient_statistics$global_suff_stat_one[i]
+    probs <- cbind(probs,
+                   global_sufficient_statistics$global_suff_stat_one[i] / sum(global_sufficient_statistics$global_suff_stat_one))
+  }
+  
+  return(list("mixing_probs" = probs,
+              "means" = means,
+              "covs" = covs))
+}
+
+
 

@@ -1,19 +1,11 @@
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/data_generation.R')
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/all_models_use.R')
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/data_generation.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/all_models_use.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
 
 calculate_data_belongings <- function(params, data){
-    #' Calculate component responsibilities for Univariate Gaussian Mixture Model
-    #' 
-    #' @description
-    #' The function calculates the probability that a data point belongs to
-    #' to specified component.
-    #' 
-    #' This is based on the data and the current parameter estimates.
-    #'
-    #'@param params list. A list of the different components params. Mean, sd and pi
-    #'@param data matrix or vector. Matrix if multivariate and vector if univariate
-    #'
-    #'@return data_belongings matrix. A column for each component and row for data points.
     
     ### Extracting parameters and checking if they are they same.
     means <- params$means
@@ -109,6 +101,26 @@ centralised_model <- function(data,
     }
     return(list("params" = params_old,
                 "performance" = results))
+}
+
+
+######## MULTIVARIATE ##########
+estimate_parameters_with_full_data_multivariate <- function(data, data_belongings){
+  n_k <- colSums(data_belongings)
+  n <- nrow(data)
+  k <- ncol(data_belongings)
+  
+  probs <- c()
+  means <- list()
+  covs <- list()
+  for(i in 1:k){
+    probs <- cbind(probs, n_k[i]/n)
+    means[[i]] <- colSums(data_belongings[, i] * data) / n_k[i]
+    covs[[i]] <- (t(data_belongings[,i]*(data - means[[i]]))%*%(data - means[[i]]))/n_k[i]
+  }
+  return(list('mixing_probs' = probs,
+              'means' = means,
+              'covs' = covs))
 }
 
 

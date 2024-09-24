@@ -1,7 +1,13 @@
 # Compare models 
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/IEM_model.R')
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/parallel_model.R')
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/centralised_model.R')
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/IEM_model.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/parallel_model.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/centralised_model.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
 library(psych)
 
 
@@ -86,7 +92,11 @@ parallel_test_results
 run_and_measure_centralised <- function(data_chunks,
                                         params_init){
     start_time <- Sys.time()
-    centralised_model_results <- centralised_model(unlist(data_chunks),
+    data <- c()
+    for(i in 1:length(data_chunks)){
+      data <- rbind(data, data_chunks[[i]])
+    }
+    centralised_model_results <- centralised_model(data,
                                                    params_init)
     total_time <- Sys.time() - start_time
     return(list('model_results' = centralised_model_results,
@@ -100,16 +110,19 @@ centralised_test_results
 incremental_means <- c()
 incremental_stds <- c()
 incremental_mixing_probs <- c()
+incremental_performance <- c()
 incremental_time <- c()
 
 parallel_means <- c()
 parallel_stds <- c()
 parallel_mixing_probs <- c()
+parallel_performance <- c()
 parallel_time <- c()
 
 centralised_means <- c()
 centralised_stds <- c()
 centralised_mixing_probs <- c()
+centralised_performance <- c()
 centralised_time <- c()
 
 # Number of iterations
@@ -130,6 +143,8 @@ for (i in 1:iterations) {
     incremental_means <- rbind(incremental_means, IEM_result$model_results$params$means)
     incremental_stds <- rbind(incremental_stds, IEM_result$model_results$params$stds)
     incremental_mixing_probs <- rbind(incremental_mixing_probs, IEM_result$model_results$params$mixing_probs)
+    incremental_performance <- c(incremental_performance, calculate_log_likelihood_with_full_data(unlist(data_chunks), 
+                                                                                                  IEM_result$model_results$params))
     incremental_time <- rbind(incremental_time, as.numeric(IEM_result$time_taken))
     
     # Parallel EM
@@ -137,19 +152,22 @@ for (i in 1:iterations) {
     parallel_means <- rbind(parallel_means, parallel_result$model_results$params$means)
     parallel_stds <- rbind(parallel_stds, parallel_result$model_results$params$stds)
     parallel_mixing_probs <- rbind(parallel_mixing_probs, parallel_result$model_results$params$mixing_probs)
+    parallel_performance <- c(parallel_performance, calculate_log_likelihood_with_full_data(unlist(data_chunks), 
+                                                                                            parallel_result$model_results$params))
     parallel_time <- rbind(parallel_time, as.numeric(parallel_result$time_taken))
     
     # Centralised EM
-    centralised_result <- run_and_measure_centralised(unlist(data_chunks), params_init)
+    centralised_result <- run_and_measure_centralised(data_chunks, params_init)
     centralised_means <- rbind(centralised_means, centralised_result$model_results$params$means)
     centralised_stds <- rbind(centralised_stds, centralised_result$model_results$params$stds)
     centralised_mixing_probs <- rbind(centralised_mixing_probs, centralised_result$model_results$params$mixing_probs)
+    centralised_performance <- c(centralised_performance, calculate_log_likelihood_with_full_data(unlist(data_chunks), 
+                                                                                                  centralised_result$model_results$params))
     centralised_time <- rbind(centralised_time, as.numeric(centralised_result$time_taken))
 }
 
 # Plotting histograms for means, stds, and mixing probabilities for all models
 par(mar = c(4, 4, 2, 1))  # Set smaller margins
-incremental_means
 # Plot histograms for means
 lapply(1:K, function(i) {
     hist(incremental_means[, i], main = paste("Incremental Means (Component", i, ")"), xlab = "Means")
@@ -176,6 +194,19 @@ lapply(1:K, function(i) {
 hist(incremental_time)
 hist(parallel_time)
 hist(centralised_time)
+
+describe(centralised_time)
+min(centralised_time)
+max(centralised_time)
+mean(centralised_time)
+describe(incremental_time)
+min(incremental_time)
+max(incremental_time)
+mean(incremental_time)
+describe(parallel_time)
+min(parallel_time)
+max(parallel_time)
+mean(parallel_time)
 
 describe(incremental_means)
 describe(parallel_means)

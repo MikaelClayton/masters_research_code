@@ -6,26 +6,16 @@
 #     2. iem_distributed_model
 
 # libraries
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/all_models_use.R')
-source('C:/Users/mccal/OneDrive/Desktop/Masters/Research/masters_research/data_generation.R')
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/data_generation.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
+file_to_source <- 'C:/Users/Mikae/OneDrive/Documents/Bronwyn_research_code/masters_research_code/Simulation_code/all_models_use.R'
+normalized_path <- normalizePath(file_to_source, mustWork = TRUE)
+source(normalized_path)
 
 update_univariate_global_statistics <- function(global_statistics_old,
                                                 local_statistics_old, 
                                                 local_statistics_new){
-    #' Updates global sufficient statistics for IEM GMM model.
-    #' 
-    #' @description
-    #' The function updates the global sufficient statistics for a univariate
-    #' Gaussian mixture model using Incremental EM algorithm.
-    #' 
-    #' This is a way to aggregate the local sufficient statistics through 
-    #' continuous updates.
-    #'
-    #'@param global_statistics_old list. List of the global sufficient statistics.
-    #'@param local_statistics_old list. List of specific node local sufficient stats.
-    #'@param local_statistics_new list. New list of specific node local ss.
-    #'
-    #'@return data_belongings matrix. A column for each component and row for data points.
     
     global_suff_stat_one <- global_statistics_old[[1]] + local_statistics_new[[1]] - local_statistics_old[[1]]
     global_suff_stat_two <- global_statistics_old[[2]] + local_statistics_new[[2]] - local_statistics_old[[2]]
@@ -49,19 +39,6 @@ iem_distributed_model <- function(data,
                                   initial_params,
                                   max_iter = 100,
                                   tol = 0.05){
-    #' Univariate Gaussian Mixture with IEM.
-    #' 
-    #' @description
-    #' The function applies Gaussian mixture model using Incremental EM algorithm.
-    #'
-    #'@param data vector. Vector that stores the data.
-    #'@param initial_local_statistics list. List of nodes local ss (initia values.)
-    #'@param initial_global_statistics list. List of global ss (initial values).
-    #'@param initial_params list. List of model parameters (initial values).
-    #'@param max_iter integer (Default = 100). Max number of iterations to run through data.
-    #'@param tol float (Default = 0.05). Min. number set for convergence of parameters.
-    #'
-    #'@return results list. Return performance results and final parameters. 
     
     n_nodes <- length(data)
     params_old <- initial_params
