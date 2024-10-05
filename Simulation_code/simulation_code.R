@@ -51,6 +51,8 @@ data_chunks <- lapply(1:m, function(x) {
                                               n = n_m)
 })
 
+plot_univariate_gaussian_data()
+
 run_and_measure_IEM <- function(data_chunks, params_init){
     # Get initial global and local statistics
     initial_local_statistics <- lapply(1:m, function(x) calculate_node_local_sufficient_statistics(
@@ -88,7 +90,7 @@ run_and_measure_parallel <- function(data_chunks,
 }
 parallel_test_results <- run_and_measure_parallel(data_chunks,
                                                   params_init)
-parallel_test_results
+parallel_test_results$model_results$params
 run_and_measure_centralised <- function(data_chunks,
                                         params_init){
     start_time <- Sys.time()
@@ -104,7 +106,7 @@ run_and_measure_centralised <- function(data_chunks,
 }
 centralised_test_results <- run_and_measure_centralised(data_chunks,
                                                         params_init)
-centralised_test_results
+centralised_test_results$model_results$params
 
 # Initialize storage for the results of each model
 incremental_means <- c()
@@ -126,7 +128,7 @@ centralised_performance <- c()
 centralised_time <- c()
 
 # Number of iterations
-iterations <- 1000
+iterations <- 100
 
 # Main loop for 1000 iterations
 for (i in 1:iterations) {
@@ -147,14 +149,6 @@ for (i in 1:iterations) {
                                                                                                   IEM_result$model_results$params))
     incremental_time <- rbind(incremental_time, as.numeric(IEM_result$time_taken))
     
-    # Parallel EM
-    parallel_result <- run_and_measure_parallel(data_chunks, params_init)
-    parallel_means <- rbind(parallel_means, parallel_result$model_results$params$means)
-    parallel_stds <- rbind(parallel_stds, parallel_result$model_results$params$stds)
-    parallel_mixing_probs <- rbind(parallel_mixing_probs, parallel_result$model_results$params$mixing_probs)
-    parallel_performance <- c(parallel_performance, calculate_log_likelihood_with_full_data(unlist(data_chunks), 
-                                                                                            parallel_result$model_results$params))
-    parallel_time <- rbind(parallel_time, as.numeric(parallel_result$time_taken))
     
     # Centralised EM
     centralised_result <- run_and_measure_centralised(data_chunks, params_init)
@@ -171,7 +165,7 @@ par(mar = c(4, 4, 2, 1))  # Set smaller margins
 # Plot histograms for means
 lapply(1:K, function(i) {
     hist(incremental_means[, i], main = paste("Incremental Means (Component", i, ")"), xlab = "Means")
-    hist(parallel_means[, i], main = paste("Parallel Means (Component", i, ")"), xlab = "Means")
+    # hist(parallel_means[, i], main = paste("Parallel Means (Component", i, ")"), xlab = "Means")
     hist(centralised_means[, i], main = paste("Centralised Means (Component", i, ")"), xlab = "Means")
 })
 
@@ -179,14 +173,14 @@ lapply(1:K, function(i) {
 # Plot histograms for standard deviations
 lapply(1:K, function(i) {
     hist(incremental_stds[, i], main = paste("Incremental STDs (Component", i, ")"), xlab = "Standard Deviations")
-    hist(parallel_stds[, i], main = paste("Parallel STDs (Component", i, ")"), xlab = "Standard Deviations")
+    #hist(parallel_stds[, i], main = paste("Parallel STDs (Component", i, ")"), xlab = "Standard Deviations")
     hist(centralised_stds[, i], main = paste("Centralised STDs (Component", i, ")"), xlab = "Standard Deviations")
 })
 
 # Plot histograms for mixing probabilities
 lapply(1:K, function(i) {
     hist(incremental_mixing_probs[, i], main = paste("Incremental Mixing Probs (Component", i, ")"), xlab = "Mixing Probabilities")
-    hist(parallel_mixing_probs[, i], main = paste("Parallel Mixing Probs (Component", i, ")"), xlab = "Mixing Probabilities")
+    # hist(parallel_mixing_probs[, i], main = paste("Parallel Mixing Probs (Component", i, ")"), xlab = "Mixing Probabilities")
     hist(centralised_mixing_probs[, i], main = paste("Centralised Mixing Probs (Component", i, ")"), xlab = "Mixing Probabilities")
 })
 

@@ -11,6 +11,7 @@
 library(plotly)
 library(reshape2)
 library(ggplot2)
+library(mvtnorm)
 generate_univariate_mixture_gaussian_data <- function(means, stds, probs, n){
     
     ## Ensure different parameter lengths match
@@ -60,7 +61,7 @@ generate_multivariate_mixture_gaussian_data <- function(means, covariances, prob
   for (i in 1:n) {
     component <- which.max(rmultinom(1, 1, probs))  # Get the component index
     components[i] <- component                      # Store component number
-    data[i, ] <- rmvnorm(1, mean = means[[component]], sigma = covariances[[component]])
+    data[i, ] <- round(rmvnorm(1, mean = means[[component]], sigma = covs[[component]]), 6)
   }
   
   return(data)  # Return both data and components
